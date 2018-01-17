@@ -249,4 +249,14 @@
         android:textOff="Activate"
         android:textOn="Active" />
 
+    <ToggleButton
+        android:id="@+id/matchObj"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignEnd="@+id/tbCheckObj2"
+        android:layout_below="@+id/tbCheckObj2"
+        android:layout_toEndOf="@+id/tbObj2"
+        android:textOff="Match"
+        android:textOn="Match!"/>
+
 </RelativeLayout>

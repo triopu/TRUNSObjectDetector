@@ -5,16 +5,26 @@ import org.opencv.android.CameraBridgeViewBase.CvCameraViewFrame;
 import org.opencv.android.JavaCameraView;
 import org.opencv.android.LoaderCallbackInterface;
 import org.opencv.android.OpenCVLoader;
+import org.opencv.android.Utils;
+import org.opencv.calib3d.Calib3d;
 import org.opencv.core.Core;
 import org.opencv.core.CvType;
+import org.opencv.core.DMatch;
+import org.opencv.core.KeyPoint;
 import org.opencv.core.Mat;
 import org.opencv.android.CameraBridgeViewBase;
 import org.opencv.android.CameraBridgeViewBase.CvCameraViewListener2;
+import org.opencv.core.MatOfDMatch;
+import org.opencv.core.MatOfKeyPoint;
 import org.opencv.core.MatOfPoint;
+import org.opencv.core.MatOfPoint2f;
 import org.opencv.core.Point;
 import org.opencv.core.Rect;
 import org.opencv.core.Scalar;
 import org.opencv.core.Size;
+import org.opencv.features2d.DescriptorExtractor;
+import org.opencv.features2d.DescriptorMatcher;
+import org.opencv.features2d.FeatureDetector;
 import org.opencv.imgproc.Imgproc;
 import org.opencv.imgproc.Moments;
 
@@ -23,6 +33,10 @@ import android.app.Activity;
 import android.bluetooth.BluetoothSocket;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
+import android.content.res.AssetManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Camera;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
@@ -40,7 +54,9 @@ import android.widget.TextView;
 import android.widget.Toast;
 import android.widget.ToggleButton;
 
-import java.util.ArrayList;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.LinkedList;
 import java.util.List;
 
 /**
@@ -49,7 +65,16 @@ import java.util.List;
 
 public class detectObject extends Activity implements OnTouchListener, CvCameraViewListener2, View.OnClickListener {
 
-    private static final String TAG = "TRUNS Activity";
+    private static final String TAG1 = "TRUNS Activity";
+    private static final String TAG2 = "OpenCV Matcher";
+
+    FeatureDetector featureDetector;
+    DescriptorExtractor descriptorExtractor;
+    DescriptorMatcher descriptorMatcher;
+
+    Mat objectImage,sceneImage;
+    Mat objectDescriptors, sceneDescriptors;
+    MatOfKeyPoint objectKeyPoints, sceneKeyPoints;
 
     private boolean             isColorSelectedObj1 = false;
     private boolean             isColorSelectedObj2 = false;
@@ -59,6 +84,10 @@ public class detectObject extends Activity implements OnTouchListener, CvCameraV
     private boolean             viewObj1            = false;
     private boolean             viewObj2            = false;
     private boolean             sendXYa             = false;
+
+    private boolean             matchingProcess     = false;
+
+    private boolean             drawSquare          = false;
 
     private Mat                 rGba;
     private Scalar              objColorRgba;
@@ -84,6 +113,7 @@ public class detectObject extends Activity implements OnTouchListener, CvCameraV
     Button          bBluetooth;
     Button          bBTDisconnect;
     ToggleButton    sendMthd;
+    ToggleButton    matchObj;
 
     ToggleButton    tbObj1;
     ToggleButton    tbObj2;
@@ -137,21 +167,28 @@ public class detectObject extends Activity implements OnTouchListener, CvCameraV
 
     static {
         if(!OpenCVLoader.initDebug()){
-            Log.d(TAG,"OpenCV not loaded");
+            Log.d(TAG1,"OpenCV not loaded");
         }else{
-            Log.d(TAG, "OpenCV loaded");
+            Log.d(TAG1, "OpenCV loaded");
         }
     }
 
     private CameraBridgeViewBase openCvCameraView;
+
     private BaseLoaderCallback loaderCallback = new BaseLoaderCallback(this) {
         @Override
         public void onManagerConnected(int status) {
             switch (status){
                 case LoaderCallbackInterface.SUCCESS:{
-                    Log.i(TAG, "OpenCV loaded successfully");
+                    Log.i(TAG1, "OpenCV loaded successfully");
                     openCvCameraView.enableView();
                     openCvCameraView.setOnTouchListener(detectObject.this);
+                    try {
+                        initializeOpenCVDependencies();
+                        Log.i("Trio","Init Success");
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
                 }break;
                 default:{
                     super.onManagerConnected(status);
@@ -161,11 +198,11 @@ public class detectObject extends Activity implements OnTouchListener, CvCameraV
     };
 
     public detectObject(){
-        Log.i(TAG,"Instantiated new"+ this.getClass());
+        Log.i(TAG1,"Instantiated new"+ this.getClass());
     }
 
     protected void onCreate(Bundle savedInstanceState) {
-        Log.i(TAG, "called onCreate");
+        Log.i(TAG1, "called onCreate");
         super.onCreate(savedInstanceState);
         this.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
@@ -177,6 +214,7 @@ public class detectObject extends Activity implements OnTouchListener, CvCameraV
         openCvCameraView.setCvCameraViewListener(this);
         bluetoothActivity.gethandler(mHandler);
         initButton();
+
     }
 
     public void initButton(){
@@ -231,6 +269,9 @@ public class detectObject extends Activity implements OnTouchListener, CvCameraV
 
         tbCheckObj2 = (ToggleButton) findViewById(R.id.tbCheckObj2);
         tbCheckObj2.setOnClickListener(this);
+
+        matchObj    = (ToggleButton)findViewById(R.id.matchObj);
+        matchObj.setOnClickListener(this);
     }
 
     @Override
@@ -244,10 +285,10 @@ public class detectObject extends Activity implements OnTouchListener, CvCameraV
     public void onResume(){
         super.onResume();
         if(!OpenCVLoader.initDebug()){
-            Log.d(TAG, "Internal OpenCV library not found. Using OpenCV Manager for initialization");
+            Log.d(TAG1, "Internal OpenCV library not found. Using OpenCV Manager for initialization");
             OpenCVLoader.initAsync(OpenCVLoader.OPENCV_VERSION, this, loaderCallback);
         }else {
-            Log.d(TAG, "OpenCV library found inside package. Using it!");
+            Log.d(TAG1, "OpenCV library found inside package. Using it!");
             loaderCallback.onManagerConnected(LoaderCallbackInterface.SUCCESS);
         }
     }
@@ -295,7 +336,7 @@ public class detectObject extends Activity implements OnTouchListener, CvCameraV
         int x = (int) event.getX() - xOffset;
         int y = (int) event.getY() - yOffset;
 
-        Log.i(TAG, "Touch image coordinates: (" + x + ", " + y + ")");
+        Log.i(TAG1, "Touch image coordinates: (" + x + ", " + y + ")");
 
         if ((x < 0) || (y < 0) || (x > cols) || (y > rows)) return false;
 
@@ -319,7 +360,7 @@ public class detectObject extends Activity implements OnTouchListener, CvCameraV
 
         objColorRgba = convertScalarHsv2Rgba(objColorHsv);
 
-        Log.i(TAG, "Touched rgba color: (" + objColorRgba.val[0] + ", " + objColorRgba.val[1] +
+        Log.i(TAG1, "Touched rgba color: (" + objColorRgba.val[0] + ", " + objColorRgba.val[1] +
                 ", " + objColorRgba.val[2] + ", " + objColorRgba.val[3] + ")");
 
         if(isColorSelectedObj1)theDetectorObj1.setHsvColor(objColorHsv1);
@@ -379,6 +420,12 @@ public class detectObject extends Activity implements OnTouchListener, CvCameraV
 
         rGba = inputFrame.rgba();
         drawLine();
+
+        if(matchingProcess) {
+            Mat detectObj = inputFrame.rgba();
+            matchDetect(detectObj);
+        }
+
         //Object 1
         if(viewObj1){
             getObj1();
@@ -596,6 +643,114 @@ public class detectObject extends Activity implements OnTouchListener, CvCameraV
         }
     }
 
+    public void initializeOpenCVDependencies() throws IOException {
+        openCvCameraView.enableView();
+        featureDetector     = FeatureDetector.create(FeatureDetector.ORB);
+        descriptorExtractor = DescriptorExtractor.create(DescriptorExtractor.ORB);
+        descriptorMatcher   = DescriptorMatcher.create(DescriptorMatcher.BRUTEFORCE_HAMMING);
+        objectImage         = new Mat();
+        AssetManager    assetManager   = getAssets();
+        InputStream     istr           = assetManager.open("img/objectRef.jpg");
+        Bitmap bitmap = BitmapFactory.decodeStream(istr);
+        Utils.bitmapToMat(bitmap, objectImage);
+        Imgproc.cvtColor(objectImage, objectImage, Imgproc.COLOR_RGB2GRAY);
+        objectImage.convertTo(objectImage, 0); //converting the image to match with the type of the cameras image
+        objectDescriptors = new Mat();
+        objectKeyPoints = new MatOfKeyPoint();
+        Log.d(TAG2,"Computing descriptors...");
+        featureDetector.detect(objectImage, objectKeyPoints);
+        Log.d(TAG2,"Detecting key points...");
+        descriptorExtractor.compute(objectImage, objectKeyPoints, objectDescriptors);
+    }
+
+    public void matchDetect(Mat aInputFrame){
+        sceneImage 	= aInputFrame;
+
+        Mat sceneProcess = new Mat();
+        Imgproc.cvtColor(sceneImage,sceneProcess, Imgproc.COLOR_RGB2GRAY);
+        sceneDescriptors = new Mat();
+        sceneKeyPoints = new MatOfKeyPoint();
+        featureDetector.detect(sceneProcess, sceneKeyPoints);
+        descriptorExtractor.compute(sceneProcess, sceneKeyPoints, sceneDescriptors);
+
+        MatOfDMatch matches = new MatOfDMatch();
+
+        if (objectDescriptors.type() == sceneDescriptors.type() && objectDescriptors.cols() == sceneDescriptors.cols()) {
+            descriptorMatcher.match(objectDescriptors, sceneDescriptors, matches);
+        } else {
+            Log.d("Type","Not Match!");
+            //Do Nothing, this if to prevent crash
+        }
+
+
+
+        List<DMatch> matchesList = matches.toList();
+
+        Double max_dist = 0.0;
+        Double min_dist = 100.0;
+
+        for (int i = 0; i < matchesList.size(); i++) {
+            Double dist = (double) matchesList.get(i).distance;
+            if (dist < min_dist)
+                min_dist = dist;
+            if (dist > max_dist)
+                max_dist = dist;
+        }
+
+        LinkedList<DMatch> goodMatchesList = new LinkedList<DMatch>();
+        for (int i = 0; i < matchesList.size(); i++) {
+            if (matchesList.get(i).distance <= (1.5 * min_dist))
+                goodMatchesList.addLast(matchesList.get(i));
+        }
+
+        Log.d("Number of Matched",Integer.toString(goodMatchesList.size()));
+
+        if (goodMatchesList.size() >= 15) {
+            Log.d(TAG2,"Object Found!!!");
+
+            List<KeyPoint> objKeypointlist = objectKeyPoints.toList();
+            List<KeyPoint> scnKeypointlist = sceneKeyPoints.toList();
+
+            LinkedList<Point> objectPoints = new LinkedList<>();
+            LinkedList<Point> scenePoints = new LinkedList<>();
+
+            for (int i = 0; i < goodMatchesList.size(); i++) {
+                objectPoints.addLast(objKeypointlist.get(goodMatchesList.get(i).queryIdx).pt);
+                scenePoints.addLast(scnKeypointlist.get(goodMatchesList.get(i).trainIdx).pt);
+            }
+
+            MatOfPoint2f objMatOfPoint2f = new MatOfPoint2f();
+            objMatOfPoint2f.fromList(objectPoints);
+            MatOfPoint2f scnMatOfPoint2f = new MatOfPoint2f();
+            scnMatOfPoint2f.fromList(scenePoints);
+
+            Mat homography = Calib3d.findHomography(objMatOfPoint2f, scnMatOfPoint2f, Calib3d.RANSAC, 3);
+
+            Log.d("Homography",Integer.toString(homography.cols()));
+
+            if(homography.cols() == 3) {
+
+                Mat obj_corners = new Mat(4, 1, CvType.CV_32FC2);
+                Mat scene_corners = new Mat(4, 1, CvType.CV_32FC2);
+
+                obj_corners.put(0, 0, new double[]{0, 0});
+                obj_corners.put(1, 0, new double[]{objectImage.cols(), 0});
+                obj_corners.put(2, 0, new double[]{objectImage.cols(), objectImage.rows()});
+                obj_corners.put(3, 0, new double[]{0, objectImage.rows()});
+
+                Log.d(TAG2, "Transforming object corners to scene corners...");
+                Core.perspectiveTransform(obj_corners, scene_corners, homography);
+
+                Imgproc.line(rGba, new Point(scene_corners.get(0, 0)), new Point(scene_corners.get(1, 0)), new Scalar(0, 255, 0), 4);
+                Imgproc.line(rGba, new Point(scene_corners.get(1, 0)), new Point(scene_corners.get(2, 0)), new Scalar(0, 255, 0), 4);
+                Imgproc.line(rGba, new Point(scene_corners.get(2, 0)), new Point(scene_corners.get(3, 0)), new Scalar(0, 255, 0), 4);
+                Imgproc.line(rGba, new Point(scene_corners.get(3, 0)), new Point(scene_corners.get(0, 0)), new Scalar(0, 255, 0), 4);
+            }
+        } else {
+            Log.d(TAG2,"No Match!");
+        }
+    }
+
     @Override
     public void onClick(View v) {
         switch (v.getId()) {
@@ -663,6 +818,14 @@ public class detectObject extends Activity implements OnTouchListener, CvCameraV
                     Toast.makeText(this, "No Goal", Toast.LENGTH_SHORT).show();
                 }
                 break;
+            case R.id.matchObj:
+                if (matchObj.isChecked()){
+                    matchingProcess = true;
+                    Toast.makeText(this, "Test", Toast.LENGTH_SHORT).show();
+                }else{
+                    matchingProcess = false;
+                    //Do something...
+                }
         }
     }
 }
